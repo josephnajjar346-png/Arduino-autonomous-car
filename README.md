@@ -1,61 +1,74 @@
-# Arduino-autonomous-car
-Designed and implemented a state-machine-driven autonomous robot using encoder-based position control and infrared distance tracking. Integrated closed-loop PI controllers for both motion profiling and real-time distance regulation.
+# Arduino Autonomous Robot – Encoder & IR PI Control
 
-# Key Features
+Designed and implemented a state-machine-driven autonomous robot integrating encoder-based position control and infrared distance tracking. Developed closed-loop PI controllers and structured embedded logic for multi-mode control operation.
 
-Quadrature encoder feedback with interrupt handling
-Position-based PI motor control
-IR distance-based PI tracking control
-Finite state machine for sequential task execution
-Servo actuation with timed sequencing
-LED-based status indication
-10 ms real-time control loop
+---
 
-# System Overview
-This project combines position control, distance tracking, and event-driven sequencing into a structured embedded control architecture.
-The robot:
-Waits for a button press
-Lowers and raises a servo-actuated mechanism
-Executes a predefined motion sequence:
-Forward 15 cm
-Backward 30 cm
-Forward 30 cm
-Backward 15 cm
-Switches to IR-based closed-loop distance tracking for 20 seconds
-Stops and flashes LEDs before reset
+## Key Features
 
-# Control Strategy
-Position Control Mode
+- Quadrature encoder feedback using hardware interrupts
+- Position-based PI motor control
+- Infrared distance-based PI tracking control
+- Finite state machine for sequential task execution
+- 10 ms real-time control loop
+- Servo actuation and LED status sequencing
 
-Target distance converted to encoder counts
+---
 
-PI controller drives motor to reference position
+## System Overview
 
-Soft scaling near target to reduce overshoot
+This project integrates sensing, actuation, and feedback control into a structured embedded robotic system.
 
-Minimum PWM enforcement to prevent stalling
+The robot performs the following sequence:
 
-IR Distance Tracking Mode
+1. Waits for button input  
+2. Actuates a servo-driven mechanism  
+3. Executes a predefined motion profile:
+   - Forward 15 cm  
+   - Backward 30 cm  
+   - Forward 30 cm  
+   - Backward 15 cm  
+4. Switches to infrared-based distance regulation for 20 seconds  
+5. Stops and signals completion via LED  
 
-Averaged IR sensor sampling
+---
 
-Nonlinear voltage-to-distance conversion
+## Control Architecture
 
-PI control to maintain ~30 cm distance
+### Position Control Mode
 
-Automatic switching between control modes
+- Target distances converted to encoder counts  
+- PI controller regulates motor position  
+- Soft scaling near reference to reduce overshoot  
+- Minimum PWM enforcement to prevent motor stall  
 
-# Hardware
-Arduino
+### IR Distance Tracking Mode
 
-DC motor with quadrature encoder
+- Averaged IR sensor sampling  
+- Nonlinear sensor-to-distance conversion  
+- PI controller maintains ~30 cm reference distance  
+- Automatic switching between control modes via state machine  
 
-Motor driver
+---
 
-Infrared distance sensor
+## Software Architecture
 
-Servo motor
+- Finite state machine governs system transitions  
+- Interrupt-driven encoder counting  
+- 10 ms fixed-period control loop  
+- Mode switching between position and distance controllers  
 
-Push button
+---
 
-Status LED
+## Hardware
+
+- Arduino microcontroller  
+- DC motor with quadrature encoder  
+- Motor driver module  
+- Infrared distance sensor  
+- Servo motor  
+- Push button and status LED  
+
+---
+
+## System Architecture
