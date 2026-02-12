@@ -1,0 +1,440 @@
+#include <Servo.h>
+
+// =========================
+// Pin configuration
+// =========================
+const int pinBI1 = 7;      // Motor direction pin 1
+const int pinBI2 = 8;      // Motor direction pin 2
+const int pinPWM = 5;      // PWM pin for speed
+const int pinStandby = 10; // Standby pin
+const int pinA = 2;        // Encoder A pin
+const int pinB = 3;        // Encoder B pin
+const int irPin = A4;      // IR sensor pin
+const int servoPin = 6;    // Servo pin for lolly stick
+const int buttonPin = 4;   // Button input pin
+const int ledPin = 13;     // LED pin
+#define ENC_K 3840         // Encoder edges per revolution
+
+// =========================
+// Servo angles
+// =========================
+const int ANGLE_HORIZONTAL = 180; // Lolly stick horizontal
+const int ANGLE_VERTICAL = 96;    // Lolly stick vertical
+
+// =========================
+// Encoder & motion constants
+// =========================
+volatile long encoderCount = 0;
+volatile float wheelAngle = 0.0;
+
+const float WHEEL_DIAMETER = 6.5;                // cm
+const float WHEEL_CIRC = PI * WHEEL_DIAMETER;    // ~20.42 cm
+const float COUNTS_PER_CM = ENC_K / WHEEL_CIRC;  // ~188 counts/cm
+
+const long DIST_15CM = round(15 * COUNTS_PER_CM);
+const long DIST_30CM = round(30 * COUNTS_PER_CM);
+
+// =========================
+// PI controller parameters
+// =========================
+const float Kp_pos = 4.0;
+const float Ki_pos = 0.0;
+float iPrev_pos = 0.0;
+long targetPosition = 0;
+
+const float Kp_ir = -10.0;  // negative if robot needs to move toward higher IR readings
+const float Ki_ir = -20.0;
+float iPrev_ir = 0.0;
+const float TARGET_DISTANCE = 30.0; // cm
+
+const long CONTROL_PERIOD = 10; // 10 ms
+unsigned long lastControl = 0;
+
+// =========================
+// Control limits
+// =========================
+const float ERROR_THRESHOLD = 200; // counts (~1cm)
+const float MIN_PWM = 20;
+const float MAX_PWM = 255;
+
+// =========================
+// Timing & state machine
+// =========================
+enum State {
+  WAIT_BUTTON,
+  WAIT_1SEC,
+  LOWER_STICK,
+  WAIT_LOWER,
+  FLASH_LEDS_1,
+  RAISE_STICK,
+  WAIT_RAISE,
+  MOVE_FWD_15,
+  WAIT_FWD_15,
+  MOVE_BWD_30,
+  WAIT_BWD_30,
+  MOVE_FWD_30,
+  WAIT_FWD_30,
+  MOVE_BWD_15,
+  WAIT_BWD_15,
+  TRACK_IR,
+  FLASH_LEDS_2,
+  STOP
+};
+State currentState = WAIT_BUTTON;
+unsigned long stateStartTime = 0;
+
+// All waits except tracking = 1 second
+const unsigned long waitIntervals[] = {
+  0,     // [0] unused
+  1000,  // [1] WAIT_1SEC
+  1000,  // [2] LOWER_STICK
+  1000,  // [3] WAIT_LOWER
+  1000,  // [4] RAISE_STICK
+  1000,  // [5] WAIT_FWD_15
+  1000,  // [6] WAIT_BWD_30
+  1000,  // [7] WAIT_FWD_30
+  1000,  // [8] WAIT_BWD_15
+  20000  // [9] TRACK_IR (20s)
+};
+
+const long POSITION_TOLERANCE = 50; // encoder tolerance
+const unsigned long FLASH_ON = 500;
+const unsigned long FLASH_OFF = 500;
+
+int flashCount = 0;
+bool ledState = false;
+
+// =========================
+// Misc variables
+// =========================
+unsigned long lastPrint = 0;
+const long PRINT_PERIOD = 250;
+int motorPWM = 0;
+bool useIRControl = false;
+
+Servo servo1;
+
+// =========================
+// Setup
+// =========================
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(pinBI1, OUTPUT);
+  pinMode(pinBI2, OUTPUT);
+  pinMode(pinPWM, OUTPUT);
+  pinMode(pinStandby, OUTPUT);
+  digitalWrite(pinStandby, HIGH);
+
+  pinMode(pinA, INPUT);
+  pinMode(pinB, INPUT);
+  attachInterrupt(digitalPinToInterrupt(pinA), updateEncoderA, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(pinB), updateEncoderB, CHANGE);
+
+  pinMode(buttonPin, INPUT);
+  pinMode(ledPin, OUTPUT);
+  digitalWrite(ledPin, LOW);
+
+  servo1.attach(servoPin);
+  servo1.write(ANGLE_VERTICAL);
+
+  encoderCount = 0;
+  wheelAngle = 0.0;
+  stateStartTime = millis();
+  lastControl = millis();
+
+  Serial.println("Robot demo ready!");
+}
+
+// =========================
+// Main loop
+// =========================
+void loop() {
+  unsigned long currentTime = millis();
+
+  // Periodic serial print
+  if (currentTime - lastPrint >= PRINT_PERIOD) {
+    Serial.print("State: ");
+    Serial.print(currentState);
+    Serial.print(" | Pos(cm): ");
+    Serial.print(encoderCount / COUNTS_PER_CM);
+    Serial.print(" | IR(cm): ");
+    Serial.print(irToDistance(analogRead(irPin)));
+    Serial.print(" | PWM: ");
+    Serial.println(motorPWM);
+    lastPrint = currentTime;
+  }
+
+  // Run control loop
+  if (currentTime - lastControl >= CONTROL_PERIOD) {
+    if (useIRControl) {
+      int irValue = 0;
+      for (int i = 0; i < 8; i++) irValue += analogRead(irPin);
+      irValue /= 8;
+      float currentDistance = irToDistance(irValue);
+      motorPWM = piControllerIR(Kp_ir, Ki_ir, TARGET_DISTANCE, currentDistance, CONTROL_PERIOD / 1000.0);
+    } else {
+      motorPWM = piControllerPos(Kp_pos, Ki_pos, targetPosition, encoderCount, CONTROL_PERIOD / 1000.0);
+    }
+
+    if (motorPWM >= 0) {
+      digitalWrite(pinBI1, HIGH);
+      digitalWrite(pinBI2, LOW);
+    } else {
+      digitalWrite(pinBI1, LOW);
+      digitalWrite(pinBI2, HIGH);
+      motorPWM = -motorPWM;
+    }
+
+    motorPWM = constrain(motorPWM, 0, 255);
+    analogWrite(pinPWM, motorPWM);
+    lastControl = currentTime;
+  }
+
+  // =========================
+  // STATE MACHINE
+  // =========================
+  switch (currentState) {
+    case WAIT_BUTTON:
+      if (digitalRead(buttonPin) == HIGH) {
+        delay(50); // debounce
+        if (digitalRead(buttonPin) == HIGH) {
+          stateStartTime = currentTime;
+          currentState = WAIT_1SEC;
+        }
+      }
+      break;
+
+    case WAIT_1SEC:
+      if (currentTime - stateStartTime >= waitIntervals[1]) {
+        servo1.attach(servoPin);
+        servo1.write(ANGLE_HORIZONTAL);
+        stateStartTime = currentTime;
+        currentState = LOWER_STICK;
+      }
+      break;
+
+    case LOWER_STICK:
+      if (currentTime - stateStartTime >= waitIntervals[2]) {
+        currentState = WAIT_LOWER;
+        stateStartTime = currentTime;
+      }
+      break;
+
+    case WAIT_LOWER:
+      if (currentTime - stateStartTime >= waitIntervals[3]) {
+        flashCount = 0;
+        ledState = true;
+        digitalWrite(ledPin, HIGH);
+        stateStartTime = currentTime;
+        currentState = FLASH_LEDS_1;
+      }
+      break;
+
+    case FLASH_LEDS_1:
+      if (ledState && (currentTime - stateStartTime >= FLASH_ON)) {
+        digitalWrite(ledPin, LOW);
+        ledState = false;
+        stateStartTime = currentTime;
+      } else if (!ledState && (currentTime - stateStartTime >= FLASH_OFF)) {
+        flashCount++;
+        if (flashCount < 3) {
+          digitalWrite(ledPin, HIGH);
+          ledState = true;
+          stateStartTime = currentTime;
+        } else {
+          digitalWrite(ledPin, LOW);
+          servo1.write(ANGLE_VERTICAL);
+          stateStartTime = currentTime;
+          currentState = RAISE_STICK;
+        }
+      }
+      break;
+
+    case RAISE_STICK:
+      if (currentTime - stateStartTime >= waitIntervals[4]) {
+        servo1.detach();
+        useIRControl = false;
+        targetPosition = encoderCount + DIST_15CM;
+        iPrev_pos = 0;
+        stateStartTime = currentTime;
+        currentState = MOVE_FWD_15;
+      }
+      break;
+
+    case MOVE_FWD_15:
+      if (abs(encoderCount - targetPosition) <= POSITION_TOLERANCE) {
+        targetPosition = encoderCount;
+        stateStartTime = currentTime;
+        currentState = WAIT_FWD_15;
+      }
+      break;
+
+    case WAIT_FWD_15:
+      if (currentTime - stateStartTime >= waitIntervals[5]) {
+        targetPosition = encoderCount - DIST_30CM;
+        iPrev_pos = 0;
+        stateStartTime = currentTime;
+        currentState = MOVE_BWD_30;
+      }
+      break;
+
+    case MOVE_BWD_30:
+      if (abs(encoderCount - targetPosition) <= POSITION_TOLERANCE) {
+        targetPosition = encoderCount;
+        stateStartTime = currentTime;
+        currentState = WAIT_BWD_30;
+      }
+      break;
+
+    case WAIT_BWD_30:
+      if (currentTime - stateStartTime >= waitIntervals[6]) {
+        targetPosition = encoderCount + DIST_30CM;
+        iPrev_pos = 0;
+        stateStartTime = currentTime;
+        currentState = MOVE_FWD_30;
+      }
+      break;
+
+    case MOVE_FWD_30:
+      if (abs(encoderCount - targetPosition) <= POSITION_TOLERANCE) {
+        targetPosition = encoderCount;
+        stateStartTime = currentTime;
+        currentState = WAIT_FWD_30;
+      }
+      break;
+
+    case WAIT_FWD_30:
+      if (currentTime - stateStartTime >= waitIntervals[7]) {
+        targetPosition = encoderCount - DIST_15CM;
+        iPrev_pos = 0;
+        stateStartTime = currentTime;
+        currentState = MOVE_BWD_15;
+      }
+      break;
+
+    case MOVE_BWD_15:
+      if (abs(encoderCount - targetPosition) <= POSITION_TOLERANCE) {
+        targetPosition = encoderCount;
+        stateStartTime = currentTime;
+        currentState = WAIT_BWD_15;
+      }
+      break;
+
+    case WAIT_BWD_15:
+      if (currentTime - stateStartTime >= waitIntervals[8]) {
+        useIRControl = true;
+        iPrev_ir = 0;
+        stateStartTime = currentTime;
+        currentState = TRACK_IR;
+      }
+      break;
+
+    case TRACK_IR:
+      if (currentTime - stateStartTime >= waitIntervals[9]) {  // 20s exactly
+        useIRControl = false;
+        analogWrite(pinPWM, 0);
+        motorPWM = 0;
+        flashCount = 0;
+        ledState = true;
+        digitalWrite(ledPin, HIGH);
+        stateStartTime = currentTime;
+        currentState = FLASH_LEDS_2;
+      }
+      break;
+
+    case FLASH_LEDS_2:
+      if (ledState && (currentTime - stateStartTime >= FLASH_ON)) {
+        digitalWrite(ledPin, LOW);
+        ledState = false;
+        stateStartTime = currentTime;
+      } else if (!ledState && (currentTime - stateStartTime >= FLASH_OFF)) {
+        flashCount++;
+        if (flashCount < 3) {
+          digitalWrite(ledPin, HIGH);
+          ledState = true;
+          stateStartTime = currentTime;
+        } else {
+          digitalWrite(ledPin, LOW);
+          currentState = STOP;
+        }
+      }
+      break;
+
+    case STOP:
+      analogWrite(pinPWM, 0);
+      if (digitalRead(buttonPin) == HIGH) {
+        delay(50);
+        if (digitalRead(buttonPin) == HIGH) {
+          encoderCount = 0;
+          targetPosition = 0;
+          iPrev_pos = 0;
+          iPrev_ir = 0;
+          useIRControl = false;
+          stateStartTime = currentTime;
+          currentState = WAIT_1SEC;
+        }
+      }
+      break;
+  }
+}
+
+// =========================
+// Helper functions
+// =========================
+int piControllerPos(float Kp, float Ki, long ref, long fb, float dt) {
+  float error = ref - fb;
+  float p = Kp * error;
+  float i = iPrev_pos + (Ki * error * dt);
+  i = constrain(i, -255, 255);
+  float m = p + i;
+
+  float absError = abs(error);
+  if (absError < ERROR_THRESHOLD) {
+    float scale = absError / ERROR_THRESHOLD;
+    m *= scale;
+    if (abs(m) < MIN_PWM && absError > POSITION_TOLERANCE)
+      m = (m >= 0) ? MIN_PWM : -MIN_PWM;
+  }
+  m = constrain(m, -255, 255);
+  iPrev_pos = i;
+  return (int)m;
+}
+
+int piControllerIR(float Kp, float Ki, float ref, float fb, float dt) {
+  float error = ref - fb;
+  float p = Kp * error;
+  float i = iPrev_ir + (Ki * error * dt);
+  i = constrain(i, -255, 255);
+  float m = p + i;
+  m = constrain(m, -255, 255);
+  iPrev_ir = i;
+  return (int)m;
+}
+
+float irToDistance(int irValue) {
+  float distance = (6787.0 / (irValue + 10)) - 4.0;
+  return constrain(distance, 10, 80);
+}
+
+void updateEncoderA() {
+  if (digitalRead(pinA) == HIGH) {
+    if (digitalRead(pinB) == LOW) encoderCount++;
+    else encoderCount--;
+  } else {
+    if (digitalRead(pinB) == HIGH) encoderCount++;
+    else encoderCount--;
+  }
+  wheelAngle = (360.0 * encoderCount) / ENC_K;
+}
+
+void updateEncoderB() {
+  if (digitalRead(pinB) == HIGH) {
+    if (digitalRead(pinA) == HIGH) encoderCount++;
+    else encoderCount--;
+  } else {
+    if (digitalRead(pinA) == LOW) encoderCount++;
+    else encoderCount--;
+  }
+  wheelAngle = (360.0 * encoderCount) / ENC_K;
+}
