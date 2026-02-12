@@ -72,3 +72,6 @@ The robot performs the following sequence:
 ---
 
 ## System Architecture
+![Robot Arm](image1.png)
+![Robot Arm](image2.png)
+![Robot Arm](image3.png)
